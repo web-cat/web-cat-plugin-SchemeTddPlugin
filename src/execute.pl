@@ -8,13 +8,14 @@
 #       executeSchemeTDD.pl <properties-file>
 #=============================================================================
 use strict;
+use Config::Properties::Simple;
 use English;
 use File::stat;
-use Win32::Job;
-use Config::Properties::Simple;
 use Lisp::Reader  qw(lisp_read);
 use Lisp::Printer qw(lisp_print);
+use Proc::Background;
 use Web_CAT::FeedbackGenerator;
+use Web_CAT::Utilities;
 
 
 #=============================================================================
@@ -36,10 +37,15 @@ my $timeout	= $cfg->getProperty( 'timeoutForOneRun', 30 );
 #-------------------------------------------------------
 my $debug              = $cfg->getProperty( 'debug',       0 );
 my $max_score          = $cfg->getProperty( 'max.score.correctness', 0 );
-my $predicateList      = $cfg->getProperty( 'predicateList', "" );
-if ( !defined( $predicateList ) || $predicateList eq "" )
+my $predicates         = $cfg->getProperty( 'predicateList', "" );
+my @predicateList      = ();
+if ( !defined( $predicates ) || $predicates eq "" )
 {
     print STDERR "predicateList is undefined.\n";
+}
+else
+{
+    @predicateList = split(/\s+|[,|]\s*/, $predicates);
 }
 
 #-------------------------------------------------------
@@ -149,10 +155,18 @@ elsif ( ! -f $instr_src )
 # Change to specified working directory and set up log directory
 chdir( $working_dir );
 
+my $script_log_started = 0;
+
 sub studentLog
 {
     open( SCRIPT_LOG, ">>$script_log" ) ||
 	die "cannot open $script_log: $!";
+	if (!$script_log_started)
+	{
+		print SCRIPT_LOG "<div class=\"module\"><div ",
+		    "dojoType=\"webcat.TitlePane\" title=\"Warnings\">\n";
+		$script_log_started++;
+	}
     print SCRIPT_LOG @_;
     close( SCRIPT_LOG );
 }
@@ -161,11 +175,11 @@ sub studentLog
 # Find the source file to use
 # Extensions supported *.scm, *.ss, *.scheme
 #=============================================================================
-my @sources = (<*.scm *.scheme *.ss>);
+my @sources = (<*.scm *.scheme *.ss *.rkt>);
 if ( $#sources < 0 || ! -f $sources[0] )
 {
     studentLog( "<p>Cannot identify a Scheme source file.\n",
-		"Did you use a .scm, .scheme, or .ss extension?</p>\n" );
+		"Did you use a .rkt, .scm, .scheme, or .ss extension?</p>\n" );
     $can_proceed = 0;
 }
 else
@@ -198,7 +212,14 @@ sub normalize
 sub is_ref_test
 {
     my $test_in = shift;
-    return $test_in =~ m/^\(($predicateList)\s/io;
+    foreach my $pred (@predicateList)
+    {
+        if ($test_in =~ m/^\((\Q$pred\E)\s/i)
+        {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 
@@ -252,7 +273,7 @@ print INFILE<<EOF;
 ;; Redefine check-expect to do nothing
 (define-syntax check-expect
   (syntax-rules ()
-    ((check-expect x y) (if #f #t))
+    ((check-expect x y) '())
   )
 )
 
@@ -381,14 +402,16 @@ EOF
 close( INFILE );
 
     # Exec program and collect output
-    my $job = Win32::Job->new;
-    my $pid = $job->spawn( "cmd.exe",
-			   "cmd /c $scheme --load $temp_input 2>&1 > $outfile.err" );
-    if ( ! $job->run( $timeout ) )
+    my $cmdline = $Web_CAT::Utilities::SHELL
+        . "$scheme --load $temp_input 2>&1 > $outfile.err";
+    print $cmdline, "\n" if ( $debug );
+    my ( $exitcode, $timeout_status ) = Proc::Background::timeout_system(
+        $timeout, $cmdline );
+    if ( $timeout_status )
     {
-	$timeout_occurred++;
+        $timeout_occurred++;
     }
-#    system( "$scheme $scheme_lib -load $temp_input" );
+
 
     #=========================================================================
     # Compare the output to test case expectations
@@ -448,6 +471,9 @@ EOF
 	}
 	else
 	{
+		$_ =~ s/\&/\&amp;/g;
+        $_ =~ s/</&lt;/g;
+        $_ =~ s/>/&gt;/g;
 	    $feedbackGenerator->print( $_ );
 	}
     }
@@ -631,9 +657,10 @@ else
 my $reportCount = $cfg->getProperty( 'numReports', 0 );
 if ( -f $script_log ) # ( stat( $script_log )->size != 0 )
 {
+	studentLog("</div></div>");
     $reportCount++;
     $cfg->setProperty( "report${reportCount}.file",     $script_log_relative );
-    $cfg->setProperty( "report${reportCount}.mimeType", "text/plain" );
+    $cfg->setProperty( "report${reportCount}.mimeType", "text/html" );
 }
 if ( 0 ) #( $can_proceed )
 {
